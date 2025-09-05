@@ -84,18 +84,56 @@ paths
 
 # Helpers
 read_station <- function(path) {
-  df <- data.table::fread(path, na.strings = c("", "NA", "NaN", "null")) |> as_tibble() |> janitor::clean_names()
+  df <- data.table::fread(path, na.strings = c("", "NA", "NaN", "null")) |>
+    as_tibble() |>
+    janitor::clean_names()
+
   stopifnot("datetime" %in% names(df))
-  dt <- readr::parse_datetime(df$datetime, format = "%Y/%m/%d %H:%M:%S", locale = readr::locale(tz = TZ_DISPLAY))
-  df |> mutate(timestamp = dt) |> select(-datetime) |> relocate(timestamp)
+  dt_str <- trimws(as.character(df$datetime))
+
+  # Multiple candidate orders; non-padded numbers are fine with lubridate
+  orders <- c(
+    "ymd HMS", "ymd HM",            # 2025/09/02 12:18:00, 2025/09/02 12:18
+    "mdy HMS", "mdy HM",            # 9/2/2025 12:14:03, 9/2/2025 12:14
+    "ymd IMS p", "ymd IMp",         # 2025/09/02 12:18:03 PM, 2025/09/02 12:18 PM
+    "mdy IMS p", "mdy IMp"          # 9/2/2025 12:14:03 PM, 9/2/2025 12:14 PM
+  )
+
+  dt <- suppressWarnings(
+    lubridate::parse_date_time(dt_str, orders = orders, tz = TZ_DISPLAY, exact = FALSE)
+  )
+
+  # Optional: last-chance rescue for oddballs
+  if (anyNA(dt)) {
+    # Try readr's flexible parser (keeps local tz)
+    dt2 <- suppressWarnings(readr::parse_datetime(dt_str, locale = readr::locale(tz = TZ_DISPLAY), guess_max = 100000)
+    )
+    replace <- is.na(dt) & !is.na(dt2)
+    dt[replace] <- dt2[replace]
+  }
+
+  if (anyNA(dt)) {
+    nbad <- sum(is.na(dt))
+    message(sprintf("Note: %d datetimes could not be parsed in %s; keeping as NA.", nbad, basename(path)))
+    # Uncomment to see examples:
+    # print(head(unique(dt_str[is.na(dt)]), 5))
+  }
+
+  df |>
+    mutate(timestamp = dt) |>
+    select(-datetime) |>
+    relocate(timestamp)
 }
 
-# Align Minutes
+# Downsample to per-minute means
 to_minute <- function(df) {
-  df |> mutate(minute = floor_date(timestamp, "1 min")) |> group_by(minute) |> summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)), .groups = "drop")
+  df |>
+    mutate(minute = lubridate::floor_date(timestamp, "1 min")) |>
+    group_by(minute) |>
+    summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)), .groups = "drop")
 }
 
-# Wind Direction Interprater 
+# Circular difference for wind direction (degrees), in [-180, 180]
 circ_diff_deg <- function(a_deg, b_deg) {
   rad <- function(d) d * pi / 180
   deg <- function(r) r * 180 / pi
