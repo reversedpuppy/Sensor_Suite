@@ -1,0 +1,43 @@
+---
+title: "Sensor_Suite"
+execute:
+  eval: true
+  echo: true
+  warning: true
+  message: true
+  error: true
+  cache: true
+  freeze: auto
+  keep-md: false
+---
+
+```{r}
+# install once, then comment out
+needs <- c("tidyverse","lubridate","patchwork")
+to_install <- needs[!sapply(needs, requireNamespace, quietly = TRUE)]
+if (length(to_install)) install.packages(to_install, dependencies = TRUE)
+
+library(tidyverse); library(lubridate); library(patchwork)
+set.seed(42)
+
+n <- 240
+df <- tibble(
+  timestamp = as.POSIXct("2025-01-01 08:00:00", tz = "UTC") + minutes(0:(n-1)),
+  temp_c    = 20 + sin(seq(0, 4*pi, length.out = n)) + rnorm(n, 0, 0.25),
+  wind_ms   = pmax(0, rnorm(n, mean = 3, sd = 0.9))
+)
+
+p1 <- ggplot(df, aes(timestamp, temp_c)) + geom_line() +
+  labs(title="Temperature vs Time", x=NULL, y="°C") + theme_minimal()
+
+p2 <- ggplot(df, aes(wind_ms)) + geom_histogram(bins=30) +
+  labs(title="Wind speed", x="m/s", y="count") + theme_minimal()
+
+p3 <- ggplot(df, aes(wind_ms, temp_c)) + geom_point(alpha=.6) +
+  geom_smooth(se=FALSE) + labs(title="Temp vs Wind", x="m/s", y="°C") + theme_minimal()
+
+p1 | (p2 / p3)
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.

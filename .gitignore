@@ -1,0 +1,21 @@
+# R / Posit
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# renv (project library; keep renv.lock)
+renv/library/
+renv/staging/
+renv/python/
+
+# Quarto outputs & caches
+_site/
+_freeze/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Data (keep raw data out of git; commit small samples only)
+data_raw/
