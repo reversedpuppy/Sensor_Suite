@@ -11,33 +11,194 @@ execute:
   keep-md: false
 ---
 
+
 ```{r}
-# install once, then comment out
-needs <- c("tidyverse","lubridate","patchwork")
+# Libraries 
+needs <- c("tidyverse","lubridate","data.table","janitor","patchwork","DT")
 to_install <- needs[!sapply(needs, requireNamespace, quietly = TRUE)]
 if (length(to_install)) install.packages(to_install, dependencies = TRUE)
+library(tidyverse)
+library(lubridate)
+library(data.table)
+library(janitor)
+library(patchwork)
+library(DT)
 
-library(tidyverse); library(lubridate); library(patchwork)
-set.seed(42)
+TZ_DISPLAY <- "America/Denver"    # timezone for axis labels
+STATION_A  <- "MK1"               # far station from RADY
+STATION_B  <- "MK2"               # close station to RADY
 
-n <- 240
-df <- tibble(
-  timestamp = as.POSIXct("2025-01-01 08:00:00", tz = "UTC") + minutes(0:(n-1)),
-  temp_c    = 20 + sin(seq(0, 4*pi, length.out = n)) + rnorm(n, 0, 0.25),
-  wind_ms   = pmax(0, rnorm(n, mean = 3, sd = 0.9))
+# Unit Labels
+unit_map <- c(
+  t_therm_dn = "V",
+  t_therm_up = "V",
+  lwr_dn     = "W·m⁻²",
+  lwr_up     = "W·m⁻²",
+  swr_dn     = "W·m⁻²",
+  swr_up     = "W·m⁻²",
+  net_swr    = "W·m⁻²",
+  net_lwr    = "W·m⁻²",
+  wind_dir   = "deg"
 )
 
-p1 <- ggplot(df, aes(timestamp, temp_c)) + geom_line() +
-  labs(title="Temperature vs Time", x=NULL, y="°C") + theme_minimal()
+u <- function(v) if (v %in% names(unit_map)) unit_map[[v]] else NULL
 
-p2 <- ggplot(df, aes(wind_ms)) + geom_histogram(bins=30) +
-  labs(title="Wind speed", x="m/s", y="count") + theme_minimal()
+pretty_var <- function(v, include_unit = TRUE) {
+  base <- gsub("_", " ", v, fixed = TRUE)
+  base <- tools::toTitleCase(base)
+  if (include_unit && !is.null(u(v))) 
+    sprintf("%s [%s]", base, u(v)) 
+  else base
+}
 
-p3 <- ggplot(df, aes(wind_ms, temp_c)) + geom_point(alpha=.6) +
-  geom_smooth(se=FALSE) + labs(title="Temp vs Wind", x="m/s", y="°C") + theme_minimal()
+#Data labels
+label_map <- c(
+  swr_dn  = "Incoming shortwave (SW↓)",
+  swr_up  = "Reflected shortwave (SW↑)",
+  lwr_dn  = "Incoming longwave (LW↓)",
+  lwr_up  = "Outgoing longwave (LW↑)",
+  net_swr = "Net shortwave (K*)",
+  net_lwr = "Net longwave (L*)",
+  wind_speed = "Wind speed",
+  wind_dir   = "Wind direction",
+  h_temp     = "Air temperature",
+  pressure   = "Air pressure",
+  humidity   = "Humidity",
+  snow_depth = "Snow depth"
+)
 
-p1 | (p2 / p3)
+facet_lab <- function(v) {
+  base <- if (v %in% names(label_map)) label_map[[v]] else pretty_var(v, include_unit = FALSE)
+  un   <- u(v)
+  if (!is.null(un)) sprintf("%s [%s]", base, un) else base
+}
 
-## Quarto
+# Get file paths to station data
+paths <- list(
+  far   = "RMBL_ENV_DATA_STATION_MK1.csv",
+  close = "RMBL_ENV_DATA_STATION_MK2.csv"
+)
+if (!file.exists(paths$far))   paths$far   <- file.choose()
+if (!file.exists(paths$close)) paths$close <- file.choose()
+paths
 
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+# Helpers
+read_station <- function(path) {
+  df <- data.table::fread(path, na.strings = c("", "NA", "NaN", "null")) |> as_tibble() |> janitor::clean_names()
+  stopifnot("datetime" %in% names(df))
+  dt <- readr::parse_datetime(df$datetime, format = "%Y/%m/%d %H:%M:%S", locale = readr::locale(tz = TZ_DISPLAY))
+  df |> mutate(timestamp = dt) |> select(-datetime) |> relocate(timestamp)
+}
+
+# Align Minutes
+to_minute <- function(df) {
+  df |> mutate(minute = floor_date(timestamp, "1 min")) |> group_by(minute) |> summarise(across(where(is.numeric), ~mean(.x, na.rm = TRUE)), .groups = "drop")
+}
+
+# Wind Direction Interprater 
+circ_diff_deg <- function(a_deg, b_deg) {
+  rad <- function(d) d * pi / 180
+  deg <- function(r) r * 180 / pi
+  delta <- atan2(sin(rad(a_deg - b_deg)), cos(rad(a_deg - b_deg)))
+  deg(delta)
+}
+
+
+# Align Data
+far_raw   <- read_station(paths$far)
+close_raw <- read_station(paths$close)
+
+far_m   <- to_minute(far_raw)
+close_m <- to_minute(close_raw)
+
+# join data to single data frame 
+cmp <- inner_join(far_m, close_m, by = "minute", suffix = c("_A","_B"))
+
+# Variables present in both (by suffix)
+base_A <- gsub("_A$", "", setdiff(names(cmp), "minute")[grepl("_A$", names(cmp))])
+common_vars <- base_A[paste0(base_A, "_B") %in% names(cmp)]
+
+# Get Net Values
+if (all(c("swr_dn_A","swr_up_A") %in% names(cmp))) {
+  cmp <- cmp |> mutate(net_swr_A = swr_dn_A - swr_up_A, net_swr_B = swr_dn_B - swr_up_B)
+  common_vars <- unique(c(common_vars, "net_swr"))
+}
+if (all(c("lwr_dn_A","lwr_up_A") %in% names(cmp))) {
+  cmp <- cmp |> mutate(net_lwr_A = lwr_dn_A - lwr_up_A, net_lwr_B = lwr_dn_B - lwr_up_B)
+  common_vars <- unique(c(common_vars, "net_lwr"))
+}
+
+# Build Table for plots
+long_pairs <- purrr::map_dfr(common_vars, function(v) {
+  tibble(
+    minute   = cmp$minute,
+    variable = v,
+    A        = cmp[[paste0(v, "_A")]],
+    B        = cmp[[paste0(v, "_B")]]
+  )
+}) |> mutate(
+    # circular delta for wind_dir
+    delta = if_else(variable == "wind_dir", circ_diff_deg(A, B), A - B),
+    mean  = (A + B) / 2
+  )
+
+ts_long <- long_pairs |> pivot_longer(c(A, B), names_to = "station_code", values_to = "value") |> mutate(
+    station      = recode(station_code, A = STATION_A, B = STATION_B),
+    station      = forcats::fct_relevel(station, STATION_A, STATION_B),
+    minute_local = with_tz(minute, tzone = TZ_DISPLAY)
+  )
+```
+
+```{r}
+# Options "lwr_dn", "t_therm_up", "lwr_up", "swr_dn", "swr_up", "snow_depth", "wind_dir", "wind_speed", "pressure", "humidity","h_temp" , "net_swr","net_lwr" 
+vars_to_plot <- c("lwr_dn", "t_therm_up", "lwr_up", "swr_dn", "swr_up", "snow_depth", "wind_dir", "wind_speed", "pressure", "humidity","h_temp" , "net_swr","net_lwr")   # edit this list anytime
+
+# Render one figure per variable listed in vars_to_plot:
+# top  = overlay (MK1 vs MK2)
+# bottom = delta (MK1 − MK2)
+
+library(patchwork)
+
+# Title Labels
+var_label <- function(v) {
+  v %>% stringr::str_replace_all("_", " ") %>% stringr::str_to_title()
+}
+
+make_pair_plot <- function(v) {
+  top_df <- dplyr::filter(ts_long,   variable == v)
+  bot_df <- dplyr::filter(long_pairs, variable == v)
+
+  ylab_top   <- if (is.null(u(v))) NULL else sprintf("[%s]", u(v))
+  ylab_delta <- if (is.null(u(v))) "Δ (units)" else sprintf("Δ [%s]", u(v))
+
+  p_top <- ggplot(top_df, aes(minute_local, value, color = station)) +
+    geom_line(alpha = 0.9, linewidth = 0.6) +
+    labs(title = sprintf("%s — %s vs %s", facet_lab(v), STATION_A, STATION_B), x = paste0("Time (", TZ_DISPLAY, ")"), y = ylab_top, color = "Station") +
+    theme_minimal()
+
+  if (v == "wind_dir") p_top <- p_top + scale_y_continuous(limits = c(0, 360), breaks = seq(0, 360, 45))
+
+  p_bottom <- ggplot(bot_df, aes(with_tz(minute, TZ_DISPLAY), delta)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_line(alpha = 0.9) +
+    labs(title = sprintf("Δ = %s − %s", STATION_A, STATION_B), x = paste0("Time (", TZ_DISPLAY, ")"), y = ylab_delta) +
+    theme_minimal()
+
+  if (v == "wind_dir") p_bottom <- p_bottom + scale_y_continuous(limits = c(-180, 180), breaks = seq(-180, 180, 45))
+
+  (p_top / p_bottom) + plot_layout(heights = c(2, 1), guides = "collect") & theme(legend.position = "top")
+}
+
+# Only plot requested vars
+vars_avail <- sort(unique(ts_long$variable))
+vars <- intersect(vars_to_plot, vars_avail)
+if (length(vars) == 0) {
+  warning("No matching variables in ts_long; plotting all available instead.")
+  vars <- vars_avail
+}
+
+for (v in vars) {
+  print(make_pair_plot(v))
+}
+
+```
