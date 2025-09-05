@@ -12,6 +12,7 @@ renv/python/
 # Quarto outputs & caches
 _site/
 _freeze/
+.quarto/
 
 # OS cruft
 .DS_Store
